@@ -7,6 +7,9 @@ Possible conclusions include
   - Particles bouncing off the surface due to an obtuse collision angle
   - Particles being too slow to adhere
 
+## Referenced in Papers
+- Monitoring of Argon plasma in a coating manufacturing process by utilising IR imaging techniques [doi](10.1016/j.jmapro.2025.01.093)
+
 ## External requirements
 
 - [Exiftool](https://exiftool.org/)

@@ -1,9 +1,12 @@
+"""Image Processing module."""
+
 from __future__ import annotations
 
 import multiprocessing as mp
 from functools import partial
 from glob import glob
 from pathlib import Path
+from typing import TYPE_CHECKING
 from warnings import warn
 
 import cv2
@@ -12,14 +15,19 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import colormaps
+from matplotlib.animation import FuncAnimation
 from matplotlib.colors import LogNorm, Normalize
 from matplotlib.widgets import Slider
-from scipy.spatial.distance import euclidean
-from scipy.fft import rfft2
-from scipy.signal import convolve2d
-from scipy.stats import entropy, kurtosis, norm, skew
+from scipy.fft import fft2, fftshift, rfft2
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import curve_fit
+from scipy.signal import convolve2d, find_peaks
+from scipy.spatial.distance import euclidean
+from scipy.stats import entropy, kurtosis, norm, skew
+from skimage.segmentation import slic
 
+if TYPE_CHECKING:
+    from matplotlib.quiver import Quiver
 
 MAX_8_BIT = 255
 
@@ -107,12 +115,12 @@ def estPlasmaSize(path: str,thresh:float=800.0,cmap: str="hot",frames: str="all"
     return f,stack_imgs
 
 
-def collectPlasmaStats(path: str,thresh: float = 800.0,**kwargs) -> pd.DataFrame:
+def collectPlasmaStats(path: str,thresh: float = 800.0) -> pd.DataFrame:
     """Collect statistics about the area identified in the plasma.
 
     Based off estPlasmaSize, the temperature is masked to those above Tlim and the
     contour around the edge is drawn.
-    The contour is used to create a masked area from which several statistics are 
+    The contour is used to create a masked area from which several statistics are
     collected.
 
     Current list:
@@ -368,10 +376,8 @@ def estAllPlasmaSize(path: str,thresh:float=800.0,**kwargs) -> plt.Figure | list
     res = {}
     # set plotting labels
     # by default it goes to filenames
-    if len(kwargs.get("labels",[]))>0:
-        labels = kwargs.get("labels",[])
-    else:
-        labels = [Path(fn).stem for fn in path]
+    labels_len = len(kwargs.get("labels",[]))
+    labels =  kwargs.get("labels") if labels_len > 0 else [Path(fn).stem for fn in path]
     # ensure it is a list
     if isinstance(thresh,(float,int)):
         thresh = [thresh]
@@ -428,7 +434,7 @@ def estAllPlasmaSize(path: str,thresh:float=800.0,**kwargs) -> plt.Figure | list
             ax.plot(time,area,label=f"{label},T>={tl}")
     # set the plotting labels
     # if a non-zero align_area value was given, then the x-axis will say Aligned Time (s) instead of Time (s)
-    ax.set(xlabel=f"{"Aligned " if kwargs.get("align_area",0.0)>0 else ""}Time (s)",ylabel="Contour Area ($pix^2$)")
+    ax.set(xlabel=f"{'Aligned ' if kwargs.get('align_area',0.0)>0 else ''}Time (s)",ylabel="Contour Area ($pix^2$)")
     f.suptitle(kwargs.get("title",fr"Estimated Plasma Area vs Time (Tlim={thresh} $^\circ$C)"))
     ax.legend()
     if kwargs.get("return_data",False):
@@ -436,7 +442,7 @@ def estAllPlasmaSize(path: str,thresh:float=800.0,**kwargs) -> plt.Figure | list
     return f
 
 
-def fitPolyToPlasmaArea(data: str,**kwargs) -> tuple[plt.Figure, pd.DataFrame]:
+def fitPolyToPlasmaArea(data: str,**kwargs) -> tuple[plt.Figure, pd.DataFrame]:  # noqa: C901, PLR0912, PLR0915
     r"""Fit a 1D line to a specific time period of each data Using the data from estAllPlasmaSize, .
 
     The goal is to estimate the gradient of specific portions of the data to compare the different
@@ -586,16 +592,16 @@ def fitPolyToPlasmaArea(data: str,**kwargs) -> tuple[plt.Figure, pd.DataFrame]:
             maxm.append(d["data"][:,2].max())
             meanm.append(d["data"][:,2].mean())
             labels.append(d["label"])
-            # create points to feed into function 
+            # create points to feed into function
             xp = np.linspace(pts_mask[:,1].min(),pts_mask[:,1].max())
             yp = np.poly1d(z)(xp)
             offset=0
             if kwargs.get("use_reltime",True):
                 offset = xp.min()
             # plot the fitted data
-            ax.plot(xp-offset,yp,"--",label=f"{d["label"]} Fit")
+            ax.plot(xp-offset,yp,"--",label=f"{d['label']} Fit")
             # plot the fitted data on the other axis
-            axf.plot(xp-offset,yp,"--",label=f"{d["label"]} Fit")
+            axf.plot(xp-offset,yp,"--",label=f"{d['label']} Fit")
 
         # store the data in a dataframe
         poly_data = pd.DataFrame({f"Gradient ({suffix})":grad,f"Offset ({suffix})":off,f"Max Area ({suffix}":maxm})
@@ -722,10 +728,7 @@ def convertTempToVideo(data: np.ndarray,opath: str | None = None,cmap: int = cv2
     # create fourcc
     fourcc = cv2.VideoWriter_fourcc(*"mjpg")
     # create video writer
-    if cmap == "gray":
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),0)
-    else:
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),1)
+    out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),int(cmap != "gray"))
     # iterate over frames
     for ff in range(nf):
         # get frame
@@ -770,10 +773,7 @@ def recolormapCsplit(data: str | np.ndarray,csplit: int,opath: str,cmap: int = c
     # create fourcc
     fourcc = cv2.VideoWriter_fourcc(*"mjpg")
     # create video writer
-    if cmap == "gray":
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),0)
-    else:
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),1)
+    out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),int(cmap != "gray"))
     # iterate over frames
     for ff in range(nf):
         # get frame
@@ -838,10 +838,7 @@ def recolormapSections(data: str | np.ndarray,secs: int,opath: str,cmap: int = c
     # create fourcc
     fourcc = cv2.VideoWriter_fourcc(*"mjpg")
     # create video writer
-    if cmap == "gray":
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),0)
-    else:
-        out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),1)
+    out = cv2.VideoWriter(opath,fourcc,30.0,(width,rows),int(cmap != "gray"))
     # iterate over frames
     for ff in range(nf):
         # get frame
@@ -1070,7 +1067,7 @@ def binFrameVideo(data: np.ndarray,opath: str | None = None,levels: int = 5,mode
     out.release()
 
 
-def createTempDiffToVideo(data: np.ndarray,opath: str | None = None,cmap: int = cv2.COLORMAP_HOT):
+def createTempDiffToVideo(data: np.ndarray,opath: str | None = None,cmap: int = cv2.COLORMAP_HOT) -> None:
     """Create a video from the absolute temperature difference between frames.
 
     A colormap is applied to each difference frame and written to video
@@ -1094,18 +1091,14 @@ def createTempDiffToVideo(data: np.ndarray,opath: str | None = None,cmap: int = 
     # iterate over frames
     for prevs,now in zip(num_frames,num_frames[1:]):
         # get frame
-        diff = np.abs(data[prevs,:,:] - data[now,:,:]) 
+        diff = np.abs(data[prevs,:,:] - data[now,:,:])
         # normalize
         diff -= diff.min()
         diff /= diff.max()
         diff *= 255.0
         diff = diff.astype("uint8")
         # make 3 channel
-        if cmap=="gray":
-            diff = np.dstack(3*[diff])
-        # else apply colormap to the data
-        else:
-            diff = cv2.applyColorMap(diff,cmap)
+        diff = np.dstack(3*[diff]) if cmap=="gray" else cv2.applyColorMap(diff,cmap)
         # write data to video file
         out.write(diff)
     # release video writer
@@ -1165,7 +1158,7 @@ class PlasmaGaussian:
         self._lim = lim
         # store flag indicating if it"s negative or not
         self._rel = (lim >=0.0) and (lim <= 1.0)
-        # store last optimal values 
+        # store last optimal values
         self._opt = None
         # store covariance of fitted values
         self._cov = None
@@ -1184,13 +1177,14 @@ class PlasmaGaussian:
         # offset from right side
         self.__offset = None
 
-    def getMode(self):
+    def getMode(self) -> str:
+        """Get the current model mode."""
         return self.__mode
 
     # take the image and clip to hot values
     def _clip(self,frame: np.ndarray) -> np.ndarray:
         """Mask temperature to where the the largest hot object is and process coordinates so it"s relative to the right side of the image.
-            
+
         The temperature limits where set when the class was created
 
         Inputs:
@@ -1228,7 +1222,7 @@ class PlasmaGaussian:
         # return the coordinates as row (y) column (x)
         return self._ct[:,:,1].flatten(),self._ct[:,:,0].flatten()
 
-    def draw(self,draw_ct:bool=False,draw_text:bool=False,draw_gauss:bool=False,draw_symmangle:bool=False,**kwargs) -> np.ndarray:  # noqa: ANN003, FBT001, FBT002
+    def draw(self,draw_ct:bool=False,draw_text:bool=False,draw_gauss:bool=False,draw_symmangle:bool=False,**kwargs) -> np.ndarray:  # noqa: C901
         """Draw the results on an image.
 
         The results stored from the previously run fit_guess are drawn on the
@@ -1277,7 +1271,7 @@ class PlasmaGaussian:
             self._draw = cv2.polylines(self._draw,[self._ct],False,kwargs.get("ct_col",(0,0,255)),3)  # noqa: FBT003
         # draw text with the fitted parameters
         if draw_text and self._opt:
-            if kwargs.get("text_format",None):
+            if kwargs.get("text_format"):  # noqa: SIM108
                 txt = kwargs["text_format"](*self._opt)
             else:
                 txt ="p="+" ".join([str(o) for o in self._opt])
@@ -1331,13 +1325,12 @@ class PlasmaGaussian:
         if not self._opt:
             return np.nan
         if self.__mode in ("standard", "model"):
-            #g = norm.pdf(self._ct[:,:,1],loc=self._opt[1],scale=self._opt[2])
             g = PlasmaGaussian.gauss(self._ct[:,:,1],*self._opt)
         elif self.__mode == "exp":
             g = PlasmaGaussian.fit_egauss(self._ct[:,:,1], *self._opt)
         # scale to 0- height
         # change to be relative to left side of image
-        #g = self._shape[1]-(self._opt[0]*((g-g.min())/(g.max()-g.min()))).astype("int32")
+        #g = self._shape[1]-(self._opt[0]*((g-g.min())/(g.max()-g.min()))).astype("int32")  # noqa: ERA001
         # get "height" value of contour
         # this is already relative to the left side due to coordinate system
         gt = self._ct[:,:,0].flatten()
@@ -1360,16 +1353,15 @@ class PlasmaGaussian:
         if not self._opt:
             return np.nan
         if self.__mode in ("standard", "model"):
-            #g = norm.pdf(self._ct[:,:,1],loc=self._opt[1],scale=self._opt[2])
-            g = PlasmaGaussian.gauss(self._ct[:,:,1],)
+            g = PlasmaGaussian.gauss(self._ct[:,:,1])
         elif self.__mode == "exp":
             g = PlasmaGaussian.fit_egauss(self._ct[:,:,1], *self._opt)
-            
+
         # this is already relative to the left side due to coordinate system
         gt = self._ct[:,:,0].flatten()
         return np.abs(g-gt).mean()
 
-    def estCtArea(self):
+    def estCtArea(self) -> float:
         """Find the area of the full contour before trimming.
 
         Returns estimated contour area
@@ -1379,7 +1371,7 @@ class PlasmaGaussian:
         return cv2.contourArea(self._fullct)
 
 
-    def estSymmAngle(self,mid:int | None = None):
+    def estSymmAngle(self,mid:int | None = None) -> float:
         """Estimate the angle between the peak of the contour and the mid point along row.
 
         An ideal symmetrical gaussian will have an angle of 0 as the the peak is inline
@@ -1435,7 +1427,7 @@ class PlasmaGaussian:
         return [skew(self._ct[:,:,0])[0],kurtosis(self._ct[:,:,0],fisher=True)[0],kurtosis(self._ct[:,:,0],fisher=False)[0]]
 
 
-    def estAreaSplit(self,all_fill_value:float=5.0):
+    def estAreaSplit(self,all_fill_value:float=5.0) -> float:
         """Split the contour area down the middle and find the ratio of area above and below the midline.
 
         Used as an metric of gaussian asymmetry.
@@ -1503,8 +1495,6 @@ class PlasmaGaussian:
         col = width - col
         # calculate the standard deviation
         std = int(np.std(col))
-        # set fitted values for mean and standard deivation
-        #self._opt = [col.min(), height,mean,std]
         # get result without scaling factor
         pred = PlasmaGaussian.gauss(row, (width-col).min(), 1, self.mean, std)
         # calculate scaling factor by dividing this original by the result
@@ -1515,10 +1505,10 @@ class PlasmaGaussian:
     # function for gaussian model
     @staticmethod
     def gauss(x: np.ndarray, offset:float, amp:float, mean:float, sigma:float) -> np.ndarray:
-        """Symmetrical Gaussian modelling function
+        """Symmetrical Gaussian modelling function.
 
         The adjustment needed to put it in the right location on the image is left up to the user.
-        This is just a basic 
+        This is just a basic
 
         Inputs:
             x : Input array
@@ -1559,7 +1549,7 @@ class PlasmaGaussian:
 
         # get shape of the image
         frame_height,frame_width = self._shape
-        
+
         # only get unique coordinates
         # this is required to avoid it looping back on itself
         # data has to be positively increasing
@@ -1575,7 +1565,6 @@ class PlasmaGaussian:
             coords_uq = coords_uq[coords_uq[:, 1].argsort()]
             # change the scale so it starts from 0
             coords_uq[:,0] = frame_width - coords_uq[:,0]
-            #coords_uq[:,1] -= coords_uq[:,1].min()
             row = coords_uq[:,1]
             col = coords_uq[:,0]
 
@@ -1590,13 +1579,10 @@ class PlasmaGaussian:
         # offset, amp, mean, sigma
         # fit curve to the data
         # std dev has non zero lower limit to avoid div zero errors
-        #print("p0", [0, 300, mean, std])
-        #print("bounds", [(0,10,0,1),(3,500,frame_height,10)])
         popt,pcov=curve_fit(PlasmaGaussian.gauss, row, col,
-                    #p0=[coords_uq[:,0].min(), 1e-6, mean, max(1e-6,std)], # initial guess based on data
                     p0 = [0, 300, mean, std],
                     bounds=[(0,10,0,1), # set bounds to stop it going too high
-                            (3,500,frame_height,13)], 
+                            (3,500,frame_height,13)],
                     method=kwargs.get("method","dogbox"), # method to use
                     maxfev=kwargs.get("maxfev",1e3)) # number of iterations
         self._opt = popt.tolist()
@@ -1636,7 +1622,7 @@ class PlasmaGaussian:
             scale : Scaling parameter
             lbda : Lambda parameter
             std_dev : Standard deviation
-            mean : Mean location of distribution  
+            mean : Mean location of distribution
         """
         import scipy.special as sse
         # from https://stackoverflow.com/q/36900920
@@ -1645,7 +1631,7 @@ class PlasmaGaussian:
 
 
 # generic method to use with CoaxialPlane.frame
-def calcFrameMetric(frame: np.ndarray,use_metric,segs:int) -> np.ndarray:
+def calcFrameMetric(frame: np.ndarray,use_metric:callable,segs:int) -> np.ndarray:
     r,c = frame.shape
     metric = np.zeros((r,c),dtype="float32")
     # iterate over rows in jumps
@@ -1678,8 +1664,8 @@ class CoaxialPlane:
         1 : Range is over the entire width of the image
         2 : Range is over the entire width with the right most point being on the mid point
     """
-    
-    def __init__(self,k:int=1,nsegs:int=29,trim:bool=True,line_lims:int=0,threshold:bool=False,**kwargs) -> None:  # noqa: ANN003, FBT001, FBT002
+
+    def __init__(self,k:int=1,nsegs:int=29,trim:bool=True,line_lims:int=0,threshold:bool=False,**kwargs) -> None:
         """Estimate the coaxial plane gradient of the powder distribution by fitting a polynomial to the entropy of the temperature image.
 
         Inputs:
@@ -1715,7 +1701,7 @@ class CoaxialPlane:
         self._minsegs = kwargs.get("min_segs",0)
 
     # function for checking that the number of segments is a factor of the image size
-    def _checkInput(self,frame: np.ndarray):
+    def _checkInput(self,frame: np.ndarray) -> None:
         """Check input against class settings.
 
         Conditions:
@@ -1788,7 +1774,7 @@ class CoaxialPlane:
         return metric
 
 
-    def drawLastLine(self,show_marks:bool=False,on_source:bool=False,**kwargs) -> np.ndarray:  # noqa: ANN003, FBT001, FBT002
+    def drawLastLine(self,show_marks:bool=False,on_source:bool=False,**kwargs) -> np.ndarray:  # noqa: C901
         """Draw last fitted line on an image.
 
         If on_source is False, then the last grayscale entropy matrix is drawn on.
@@ -1858,19 +1844,19 @@ class CoaxialPlane:
     def estTheta(self,offset:float=-np.pi/2) -> float:
         """Estimate the angle of the coaxial plane from the fitted line.
 
-            The angle is estimated by taking the first and last points of the curve, treating
-            them as vertices of a triangle and using arctan to find the angle between them.
+        The angle is estimated by taking the first and last points of the curve, treating
+        them as vertices of a triangle and using arctan to find the angle between them.
 
-            This uses the last fitted line.
+        This uses the last fitted line.
 
-            The purpose of offset is to change the reference point. By default a horizontal
-            line reads as approx pi/2. By applying an offset of -pi/2, a horizontal line
-            has an angle of 0.
+        The purpose of offset is to change the reference point. By default a horizontal
+        line reads as approx pi/2. By applying an offset of -pi/2, a horizontal line
+        has an angle of 0.
 
-            Inputs:
-                offset : Angle offset added from the calculated angle in radians. Default 0
+        Inputs:
+            offset : Angle offset added from the calculated angle in radians. Default 0
 
-            Returns estimated coaxial plane angle in raidans
+        Returns estimated coaxial plane angle in raidans
         """
         if len(self._last)==0:
             msg = "Unable to find theta! Line has not been fitted"
@@ -1974,7 +1960,7 @@ class CoaxialPlane:
         # return the fitted parameters
         return self._last
 
-    def estPlaneUsing(self,frame: np.ndarray,use_metric):
+    def estPlaneUsing(self,frame: np.ndarray,use_metric:callable) -> list:
         """Fit a line across the high entropy regions of the image.
 
         The entropy is calculated across regions of the image according
@@ -2044,7 +2030,7 @@ class CoaxialPlane:
         # return the fitted parameters
         return self._last
 
-    def getTempStats(self):
+    def getTempStats(self) -> list:
         """Calculate statistics about the masked area used to calculate coaxial plane.
 
         estPlane must have been called recently to set the appropriate variables
@@ -2084,7 +2070,7 @@ class CoaxialPlane:
         return (scale*x*np.sin(x*(freq/2*np.pi)))+offset
 
 
-    def estPlaneExperimental(self,frame: np.ndarray):
+    def estPlaneExperimental(self,frame: np.ndarray) -> np.ndarray:
         """Slightly different version of estPlane that attempts to fit a scaled sine wave to the entropy values using scipy.optimize.curve_fit function.
 
         Very different results compared to the original.
@@ -2141,7 +2127,7 @@ class CoaxialPlane:
         # return the fitted parameters
         return self._exp
 
-    def drawLastExperimental(self,show_marks:bool=False,on_source:bool=False):  # noqa: FBT001, FBT002
+    def drawLastExperimental(self,show_marks:bool=False,on_source:bool=False) -> np.ndarray:  # noqa: C901
         # make an image to draw the line on
         # either the previous source data colormapped
         if on_source:
@@ -2182,7 +2168,7 @@ class CoaxialPlane:
         # form into coordinate pairs
         coords = [(int(cc),int(rr)) for cc,rr in zip(px,py)]
         # iterate over coordinates drawing a blue line between points
-        for cA,cB in zip(coords,coords[1:]):
+        for cA,cB in zip(coords,coords[1:]):  # noqa: N806
             draw = cv2.line(draw,cA,cB,(255,0,0),3)
         # if line mode is 2 when draw the final point at the middle row of the image on the right hand side
         if self._llims == 2:
@@ -2239,7 +2225,7 @@ def clipMaskPlasma(frame: np.ndarray,thresh: float = 1300,fill: str = "min") -> 
     return frame
 
 
-def coaxialPlaneSlider(fn:str,k:int=2,filt=clipMaskPlasma,**kwargs):  # noqa: ANN003
+def coaxialPlaneSlider(fn:str,k:int=2,filt:callable=clipMaskPlasma,**kwargs) -> None:
     """Fit coaxial plane to the data at a fixed order.
 
     The user controls a slider to control which frame is being processed
@@ -2261,7 +2247,7 @@ def coaxialPlaneSlider(fn:str,k:int=2,filt=clipMaskPlasma,**kwargs):  # noqa: AN
     if filt:
         cv2.namedWindow("Filtered")
 
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         ni = int(cv2.getTrackbarPos("Frame","CP"))
         frame = data[ni,:,:]
         source = CoaxialPlane.frame2gray(frame)
@@ -2291,7 +2277,7 @@ def coaxialPlaneSlider(fn:str,k:int=2,filt=clipMaskPlasma,**kwargs):  # noqa: AN
     cv2.waitKey(0)
 
 
-def coaxialPlaneParams(fn:str,k:int=2,filt=None,**kwargs):
+def coaxialPlaneParams(fn:str,k:int=2,filt:callable|None=None,**kwargs) -> plt.Figure:
     """Plot the coaxial plane parameters for the target parameter.
 
     When filt is a list/tuple, the functions are executed un order and passed to the next
@@ -2386,7 +2372,7 @@ def coaxialPlaneParams(fn:str,k:int=2,filt=None,**kwargs):
     return None,None,coaxialdf
 
 
-def plasmaGaussianSlider(path:str,padding:int=10,**kwargs):  # noqa: ANN003
+def plasmaGaussianSlider(path:str,padding:int=10,**kwargs) -> None:
     """Scroll through a file using a slider applying PlasmaGaussian.fit_guess to each frame and drawing the results.
 
     The input padding controls the amount of white space between the source and results.
@@ -2409,20 +2395,20 @@ def plasmaGaussianSlider(path:str,padding:int=10,**kwargs):  # noqa: ANN003
     # make class for fitting
     gf = PlasmaGaussian(kwargs.get("lim",0.9))
     # trackbar callback function
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get target frame
         ni = int(cv2.getTrackbarPos("Frame","Gaussian"))
         frame = data[ni,:,:]
         gf.fit_guess(frame)
         gray = frame2gray(frame)
-        cv2.imshow("Gaussian",np.hstack([cv2.applyColorMap(gray,cv2.COLORMAP_HOT),pad,gf.draw(True,False,False,False,**kwargs),pad,gf.draw(False,True,True,True,**kwargs)]))
+        cv2.imshow("Gaussian",np.hstack([cv2.applyColorMap(gray,cv2.COLORMAP_HOT),pad,gf.draw(True,False,False,False,**kwargs),pad,gf.draw(False,True,True,True,**kwargs)]))  # noqa: FBT003
 
     cv2.createTrackbar("Frame","Gaussian",0,nf-1,on_changed)
     on_changed(0)
     cv2.waitKey(0)
 
 
-def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs):
+def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs) -> plt.Figure:  # noqa: C901, PLR0912, PLR0915
     """Load a temperature NPZ file and find the gaussian parameters from each frame then plot it.
 
     Creates a PlasmaGaussian class and applies it to each frame. If the opts is None,
@@ -2493,14 +2479,14 @@ def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs):
             hist.append(opts)
             rmse.append(cp.estRMSE())
             symmangle.append(cp.estSymmAngle(kwargs.get("angle_ref",169)))
-            mid_row.append(cp._mid)
+            mid_row.append(cp._mid)  # noqa: SLF001
             area_ratio.append(cp.estAreaSplit())
             sk,kf,kk = cp.estSkewKurtosis()
             skew.append(sk)
             kfish.append(kf)
             kurt.append(kk)
             area.append(cp.estCtArea())
-            gauss_peak.append(cp._plasmaPk)
+            gauss_peak.append(cp._plasmaPk)  # noqa: SLF001
 
     # form into array for easier indexing
     hist = np.vstack(hist)
@@ -2589,7 +2575,7 @@ def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs):
         plt.close(fd)
 
         fd,axd = plt.subplots(constrained_layout=True,figsize=[ww,hh])
-        Dp = win_roll_max[win_roll_max>0]
+        Dp = win_roll_max[win_roll_max>0]  # noqa: N806
         if Dp.shape[0]==0:
             warn(f"Skipping log scale for w={w} as all values are zero", stacklevel=2)
             continue
@@ -2599,7 +2585,7 @@ def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs):
         fd.savefig(f"{Path(fn).stem}-windowed-parameter-euclidean-distance-neighbours-p-{w}-pve-log.png")
         plt.close(fd)
 
-    # plot the RMSE between the contour and structure 
+    # plot the RMSE between the contour and structure
     fe,axe = plt.subplots()
     axe.plot(rmse,color=kwargs.get("plot_color","magenta"))
     axe.set(xlabel="Frame Number",ylabel="RMSE (Contour vs Gaussian)",title=f"{Path(fn).stem}\nRMSE between Contour and Gaussian Fitting")
@@ -2644,7 +2630,7 @@ def plasmaGaussianParams(fn:str,transpose:int=2,**kwargs):
     plt.close("all")
     return f,gauss_df
 
-def plasmaAllGaussianParams(path:str,transpose:int=2,**kwargs) -> plt.Figure:
+def plasmaAllGaussianParams(path:str,transpose:int=2,**kwargs) -> plt.Figure:  # noqa: C901, PLR0912
     """Load ALL temperature NPZ file and find the gaussian parameters from each frame then plot it.
 
     Creates a PlasmaGaussian class and applies it to each frame. If the opts is None,
@@ -2691,16 +2677,16 @@ def plasmaAllGaussianParams(path:str,transpose:int=2,**kwargs) -> plt.Figure:
     else:
         f,ax = plt.subplots(ncols=2,nrows=2,sharex=True,constrained_layout=True,figsize=[ww*1.5*2,hh*1.5*2])
         ax = ax.flatten()
-    plot_labels = kwargs.get("plot_labels",None)
+    plot_labels = kwargs.get("plot_labels")
     # if plot labels weren"t specified
     # generate plot labels from file names
     if plot_labels is None:
-        plot_labels = [Path(fn).stem for fn in glob(path)]  # noqa: PTH207
+        plot_labels = [Path(fn).stem for fn in glob(path)]
     # if the number of labels does not match the number of files
     # raise an error
-    if len(plot_labels) != len(glob(path)):   # noqa: PTH207
+    if len(plot_labels) != len(glob(path)):
         msg = f"Number of plot labels does not match the number of files! {len(plot_labels)} vs. {len(glob(path))}"
-        raise ValueError(msg)   # noqa: PTH207
+        raise ValueError(msg)
 
     for aa in ax:
         if "xfsize" in kwargs:
@@ -2708,7 +2694,7 @@ def plasmaAllGaussianParams(path:str,transpose:int=2,**kwargs) -> plt.Figure:
         if "yfsize" in kwargs:
             aa.tick_params(axis="y",labelsize=kwargs.get("yfsize"))
     # iterate over file paths and labels
-    for fn,plabel in zip(glob(path),plot_labels):   # noqa: PTH207
+    for fn,plabel in zip(glob(path),plot_labels):
         # load data
         data = np.load(fn)["arr_0"]
         # get max temp
@@ -2748,7 +2734,7 @@ def plasmaAllGaussianParams(path:str,transpose:int=2,**kwargs) -> plt.Figure:
     f.suptitle("Gaussian Plasma Parameters",fontsize=kwargs.get("title_size",plt.rcParams["figure.titlesize"]))
     return f
 
-def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:
+def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:  # noqa: C901, PLR0912, PLR0915
     """Plot the gaussian parameter history as a Violin plot.
 
     The transpose flag controls whether the plots are horizontal or vertical.
@@ -2768,7 +2754,7 @@ def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:
 
     Returns the matplotlib figure
     """
-    def adjacent_values(vals, q1, q3):
+    def adjacent_values(vals:np.ndarray, q1:float, q3:float) -> tuple:
         upper_adjacent_value = q3 + (q3 - q1) * 1.5
         upper_adjacent_value = np.clip(upper_adjacent_value, q3, vals[-1])
 
@@ -2794,18 +2780,18 @@ def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:
             width = ww
             height = hh*1.5*nc
         f,ax = plt.subplots(ncols=nc,nrows=nr,sharex=True,constrained_layout=True,figsize=[width,height])
-    plot_labels = kwargs.get("plot_labels",None)
+    plot_labels = kwargs.get("plot_labels")
     # if plot labels weren"t specified
     # generate plot labels from file names
     if plot_labels is None:
-        plot_labels = [Path(fn).stem for fn in glob(path)]   # noqa: PTH207
+        plot_labels = [Path(fn).stem for fn in glob(path)]
     # if the number of labels does not match the number of files
     # raise an error
-    if len(plot_labels) != len(glob(path)):   # noqa: PTH207
+    if len(plot_labels) != len(glob(path)):
         msg = f"Number of plot labels does not match the number of files! {len(plot_labels)} vs. {len(glob(path))}"
-        raise ValueError(msg)   # noqa: PTH207
+        raise ValueError(msg)
 
-    plot_labels = dict(zip([Path(fn).stem for fn in glob(path)],plot_labels))   # noqa: PTH207
+    plot_labels = dict(zip([Path(fn).stem for fn in glob(path)],plot_labels))
     for aa in ax:
         if "xfsize" in kwargs:
             aa.tick_params(axis="x",labelsize=kwargs.get("xfsize"))
@@ -2819,7 +2805,7 @@ def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:
     fc,axc = plt.subplots(constrained_layout=True,sharex=True)
 
     # iterate over file paths and labels
-    for fn,plabel in zip(glob(path),plot_labels):   # noqa: PTH207
+    for fn,plabel in zip(glob(path),plot_labels):
         # load data
         data = np.load(fn)["arr_0"]
         # get filename
@@ -2870,23 +2856,23 @@ def plasmaGaussianBoxPlot(path:str,transpose:int=1,**kwargs) -> plt.Figure:
             adjacent_values(sorted_array, q1, q3)
             for sorted_array, q1, q3 in zip(data, quartile1, quartile3)])
         whiskers_min, whiskers_max = whiskers[:, 0], whiskers[:, 1]
-        
+
         inds = np.arange(1, len(medians) + 1)
         aa.scatter(inds, medians, marker="o", color="white", s=30, zorder=3)
         aa.vlines(inds, quartile1, quartile3, color="k", linestyle="-", lw=5)
 
         aa.vlines(inds, whiskers_min.max(1), whiskers_max.max(1), color="k", linestyle="-", lw=1)
-            
+
         aa.set(xlabel="Plasma Gas Flow",ylabel=title,title=title)
         aa.set_xticks(np.arange(1,len(pp.values())+1),labels=[plot_labels[k] for k in pp])
         aa.set_xlim(0.25, len(pp.values()) + 0.75)
     f.suptitle(kwargs.get("ftitle","Violin Plot of Gas Flow Rate vs Gaussian Model Parameters"))
-                  
+
     axc.set(xlabel="Height (pixels)",ylabel="Std Dev (pixels)",title="Height vs Std Dev")
     axc.legend()
     return ax,axc
 
-def temperatureStatsAboveLim(path:str,lim:float=1300.0,transpose:int=1,**kwargs) -> plt.Figure:  # noqa: ANN003
+def temperatureStatsAboveLim(path:str,lim:float=1300.0,transpose:int=1,**kwargs) -> plt.Figure:  # noqa: C901, PLR0912
     # get default figure size
     ww,hh = plt.rcParams["figure.figsize"]
     # create subplots scaling the image by number of required plots
@@ -2904,18 +2890,18 @@ def temperatureStatsAboveLim(path:str,lim:float=1300.0,transpose:int=1,**kwargs)
             width = ww
             height = hh*1.5*nc
         f,ax = plt.subplots(ncols=nc,nrows=nr,sharex=True,constrained_layout=True,figsize=[width,height])
-    plot_labels = kwargs.get("plot_labels",None)
+    plot_labels = kwargs.get("plot_labels")
     # if plot labels weren"t specified
     # generate plot labels from file names
     if plot_labels is None:
-        plot_labels = [Path(fn).stem for fn in glob(path)]   # noqa: PTH207
+        plot_labels = [Path(fn).stem for fn in glob(path)]
     # if the number of labels does not match the number of files
     # raise an error
-    if len(plot_labels) != len(glob(path)):   # noqa: PTH207
+    if len(plot_labels) != len(glob(path)):
         msg = f"Number of plot labels does not match the number of files! {len(plot_labels)} vs. {len(glob(path))}"
-        raise ValueError(msg)   # noqa: PTH207
+        raise ValueError(msg)
 
-    plot_labels = dict(zip([Path(fn).stem for fn in glob(path)],plot_labels))   # noqa: PTH207
+    plot_labels = dict(zip([Path(fn).stem for fn in glob(path)],plot_labels))
 
     for aa in ax:
         if "xfsize" in kwargs:
@@ -2926,7 +2912,7 @@ def temperatureStatsAboveLim(path:str,lim:float=1300.0,transpose:int=1,**kwargs)
     mean_hist = {}
     var_hist = {}
     # iterate over file paths and labels
-    for fn in glob(path):   # noqa: PTH207
+    for fn in glob(path):
         # load data
         data = np.load(fn)["arr_0"]
         # get filename
@@ -2955,7 +2941,7 @@ def temperatureStatsAboveLim(path:str,lim:float=1300.0,transpose:int=1,**kwargs)
     return f
 
 
-def plasmaGaussianVideo(path:str,opath:str | None=None,**kwargs) -> None:  # noqa: ANN003
+def plasmaGaussianVideo(path:str,opath:str | None=None,**kwargs) -> None:
     """Fit gaussian parameters and draw the results on a frame. The drawings are saves to a video.
 
     Inputs:
@@ -2983,7 +2969,7 @@ def plasmaGaussianVideo(path:str,opath:str | None=None,**kwargs) -> None:  # noq
     all_writer.release()
 
 
-def stackPlasmaGaussianParams(path:str,transpose:int=2,**kwargs) -> pd.DataFrame:  # noqa: ANN003
+def stackPlasmaGaussianParams(path:str,transpose:int=2,**kwargs) -> pd.DataFrame:  # noqa: C901, PLR0912
     """Iterate over several NPZ files, find the gaussian parameters from each frame then plot it on the same axis.
 
     Stacking the results
@@ -3021,7 +3007,7 @@ def stackPlasmaGaussianParams(path:str,transpose:int=2,**kwargs) -> pd.DataFrame
     else:
         f,ax = plt.subplots(ncols=2,nrows=2,sharex=True,constrained_layout=True,figsize=[ww*1.5*2,hh*1.5*2])
         ax = ax.flatten()
-    search = glob(path) if isinstance(path, str) else path   # noqa: PTH207
+    search = glob(path) if isinstance(path, str) else path
     # initialize class
     cp = PlasmaGaussian()
     for fn in search:
@@ -3087,10 +3073,10 @@ def getGPS(fn:str) -> tuple[list, float]:
     return hist,data.max(axis=(1,2))
 
 
-def plasmaGaussianScatterParamMP(path:str,target:int=0,**kwargs) -> plt.Figure:  # noqa: ANN003
+def plasmaGaussianScatterParamMP(path:str,target:int=0,**kwargs) -> plt.Figure:
     import multiprocessing as mp
     if isinstance(path,str):
-        path = glob(path)   # noqa: PTH207
+        path = glob(path)
     f,ax = plt.subplots()
     labels = ["Height","Mean","Std Dev"]
     if target in (0,2):
@@ -3110,7 +3096,7 @@ def frame2gray(frame:np.ndarray) -> np.ndarray:
     return (255*((frame-frame.min())/np.abs(frame.max()-frame.min()))).astype("uint8")
 
 
-def distanceToHotSlider(path:str):
+def distanceToHotSlider(path:str) -> None:
     """Display GUI for showing distance to non-zero hottest spot."""
     data = np.load(path)["arr_0"]
     nf,r,c = data.shape
@@ -3121,7 +3107,7 @@ def distanceToHotSlider(path:str):
     # create named window
     cv2.namedWindow("Hot Distance")
     # function for handling when the slider has been moved
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get slider value
         ni = int(cv2.getTrackbarPos("Frame","Hot Distance"))
         # extract frame
@@ -3161,7 +3147,6 @@ def coaxialPlaneSliderBlur(fn:str,k:int=2) -> None:
         fn : Path to NPZ file
         k : Polynomial order to fit
     """
-    from scipy.ndimage import gaussian_filter
     # load the target file
     data = np.load(fn)["arr_0"]
     nf,r,c = data.shape
@@ -3169,7 +3154,7 @@ def coaxialPlaneSliderBlur(fn:str,k:int=2) -> None:
     cp = CoaxialPlane(k=k,trim=False)
     # create a named window
     cv2.namedWindow("CP")
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get the target frame
         ni = int(cv2.getTrackbarPos("Frame","CP"))
         # get gaussian blur sigma
@@ -3190,7 +3175,7 @@ def coaxialPlaneSliderBlur(fn:str,k:int=2) -> None:
     on_changed(0)
     cv2.waitKey(0)
 
-def videoCoaxialPlane(fn:str,k:int=2,opath:str | None=None,filt=None,mode:int=1,**kwargs):  # noqa: ANN003
+def videoCoaxialPlane(fn:str,k:int=2,opath:str | None=None,filt:callable|None=None,mode:int=1,**kwargs) -> None:  # noqa: C901, PLR0912
     """Perform coaxial plane prediction on the target data and draw to a video file.
 
     The mode parameter controls what is written to the video.
@@ -3213,25 +3198,25 @@ def videoCoaxialPlane(fn:str,k:int=2,opath:str | None=None,filt=None,mode:int=1,
     # set it based on the mode
     if opath is None:
         if mode in ("min", 0):
-            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_min{"" if filt is None else "-filt"}.avi"
+            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_min{'' if filt is None else '-filt'}.avi"
             vc = c
             vr = r
         elif mode in ("default", 1):
-            opath = Path(fn).stem+f"_coaxial_plane_k_{k}{"" if filt is None else "-filt"}.avi"
+            opath = Path(fn).stem+f"_coaxial_plane_k_{k}{'' if filt is None else '-filt'}.avi"
             vc = c*2
             vr = r
         elif mode in ("grey", 2):
-            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_grey-only{"" if filt is None else "-filt"}.avi"
+            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_grey-only{'' if filt is None else '-filt'}.avi"
             vc = c
             vr = r
         elif mode in ("all", 3):
-            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_all{"" if filt is None else "-filt"}.avi"
+            opath = Path(fn).stem+f"_coaxial_plane_k_{k}_all{'' if filt is None else '-filt'}.avi"
             vc = c*3
             vr = r
-    
+
     # create the video writer using shape of frame
     writer = cv2.VideoWriter(opath,cv2.VideoWriter_fourcc(*"mjpg"),30.0,(vc,vr),1)
-    # check that the outfile has opened    
+    # check that the outfile has opened
     if not writer.isOpened():
         msg = f"Failed to open output file {opath}!"
         raise OSError(msg)
@@ -3264,7 +3249,7 @@ def videoCoaxialPlane(fn:str,k:int=2,opath:str | None=None,filt=None,mode:int=1,
         writer.write(draw)
     writer.release()
 
-def videoCoaxialPlaneExperimental(fn:str,opath:str | None=None,filt=None,mode:int=1):
+def videoCoaxialPlaneExperimental(fn:str,opath:str | None=None,filt:callable|None=None,mode:int=1) -> None:  # noqa: C901
     """Perform coaxial plane prediction on the target data and draw to a video file.
 
     The mode parameter controls what is written to the video.
@@ -3303,7 +3288,7 @@ def videoCoaxialPlaneExperimental(fn:str,opath:str | None=None,filt=None,mode:in
             vr = r
     # create the video writer using shape of frame
     writer = cv2.VideoWriter(opath,cv2.VideoWriter_fourcc(*"mjpg"),30.0,(vc,vr),1)
-    # check that the outfile has opened    
+    # check that the outfile has opened
     if not writer.isOpened():
         msg = f"Failed to open output file {opath}!"
         raise OSError(msg)
@@ -3387,7 +3372,7 @@ def findSumTotalObjSize(data:np.ndarray,units:str="pixels",**kwargs) -> float:
     return None
 
 
-def recolormapData(temp,tmin:float | None = None,tmax:float | None = None,cmap:str="hot",mode:str="linear"):
+def recolormapData(temp:np.ndarray,tmin:float | None = None,tmax:float | None = None,cmap:str="hot",mode:str="linear") -> np.ndarray | None:  # noqa: C901
     """Colormap data using either a matplotlib or opencv colormap.
 
     This function is designed to mimic Flir Studios colormapping functionality
@@ -3404,6 +3389,8 @@ def recolormapData(temp,tmin:float | None = None,tmax:float | None = None,cmap:s
                 then it is assumed to be a matplotlib colormap.
         mode : Normalization mode. If linear then Normalize is used. If log then LogNorm is used.
                 Used to normalize the data before applying the colormap.
+
+    Returns colour mapped array
     """
     # if the temperature range isn"t given.
     # get from data
@@ -3450,7 +3437,7 @@ def recolormapData(temp,tmin:float | None = None,tmax:float | None = None,cmap:s
     if len(temp.shape)==3:
         # create empty array to hold results
         cmapped = np.empty([*list(temp.shape), 3])
-        # create multiprocessing 
+        # create multiprocessing
         with mp.Pool(processes=4) as pool:
             res = pool.map(partial(cv2.applyColorMap,color_range),(temp[z,:,:] for z in range(temp.shape[0])))
             for z in range(temp.shape[0]):
@@ -3459,7 +3446,7 @@ def recolormapData(temp,tmin:float | None = None,tmax:float | None = None,cmap:s
     return None
 
 
-def maskMaxTempVideo(inf: str,outf: str|None = None,lim: float = 0.9):
+def maskMaxTempVideo(inf: str,outf: str|None = None) -> None:
     # if outf is None create it from the inf
     if outf is None:
         outf = Path(inf).stem+".avi"
@@ -3481,7 +3468,7 @@ def maskMaxTempVideo(inf: str,outf: str|None = None,lim: float = 0.9):
         # set pixels where the max temperature is above lim times max
         blank[data[i,:,:]>=(0.9*maxt)] = 255
         # if the entire frame is white then tehre isn"t a target object
-        # so reset it back to zeros        
+        # so reset it back to zeros
         if (blank==MAX_8_BIT).all():
             blank = np.zeros((r,c),dtype="uint8")
             writer.write(blank)
@@ -3492,7 +3479,7 @@ def maskMaxTempVideo(inf: str,outf: str|None = None,lim: float = 0.9):
     writer.release()
 
 
-def maskMaxTempSlider(path: str):
+def maskMaxTempSlider(path: str) -> None:
     """Load a temperature NPZ file and use sliders to clip the temperature to identify hot areas.
 
     One slider handles Frame index and the other is the lower temperature
@@ -3506,7 +3493,7 @@ def maskMaxTempSlider(path: str):
     data = np.load(path)["arr_0"]
     nf,r,c = data.shape
     f,ax = plt.subplots(ncols=2)
-    
+
     axfreq = f.add_axes([0.15, 0.1, 0.65, 0.03])
     freq_slider = Slider(
         ax=axfreq,
@@ -3526,7 +3513,7 @@ def maskMaxTempSlider(path: str):
         valinit=300,
         valstep=0.1,
     )
-    def update(val):
+    def update(_:int) -> None:
         ni = int(freq_slider.val)
         frame = data[ni,:,:]
         ax[0].cla()
@@ -3536,14 +3523,14 @@ def maskMaxTempSlider(path: str):
         # clip data to target
         ax[1].contourf(frame,cmap="hot",vmin=lim_slider.val,vmax=1800.0)
         f.canvas.draw_idle()
-    
+
     freq_slider.on_changed(update)
     lim_slider.on_changed(update)
     update(0)
     plt.show()
 
 
-def drawLargestObjVideo(inf: str,outf: str|None = None,lim: float = 0.9):
+def drawLargestObjVideo(inf: str,outf: str|None = None,lim: float = 0.9) -> None:
      # if outf is None create it from the inf
     if outf is None:
         outf = Path(inf).stem+"_lobj.avi"
@@ -3565,7 +3552,7 @@ def drawLargestObjVideo(inf: str,outf: str|None = None,lim: float = 0.9):
         # set pixels where the max temperature is above lim times max
         blank[data[i,:,:]>=(lim*maxt)] = 255
         # if the entire frame is white then tehre isn"t a target object
-        # so reset it back to zeros        
+        # so reset it back to zeros
         if (blank==MAX_8_BIT).all():
             blank = np.zeros((r,c,3),dtype="uint8")
             writer.write(blank)
@@ -3582,7 +3569,7 @@ def drawLargestObjVideo(inf: str,outf: str|None = None,lim: float = 0.9):
     writer.release()
 
 
-def drawExtBoundaryObj(inf: str,outf: str|None = None,lim: float = 0.9):
+def drawExtBoundaryObj(inf: str,outf: str|None = None,lim: float = 0.9) -> None:
      # if outf is None create it from the inf
     if outf is None:
         outf = Path(inf).stem+"_extct.avi"
@@ -3604,7 +3591,7 @@ def drawExtBoundaryObj(inf: str,outf: str|None = None,lim: float = 0.9):
         # set pixels where the max temperature is above lim times max
         blank[data[i,:,:]>=(lim*maxt)] = 255
         # if the entire frame is white then tehre isn"t a target object
-        # so reset it back to zeros        
+        # so reset it back to zeros
         if (blank==MAX_8_BIT).all():
             blank = np.zeros((r,c,3),dtype="uint8")
             writer.write(blank)
@@ -3620,7 +3607,7 @@ def drawExtBoundaryObj(inf: str,outf: str|None = None,lim: float = 0.9):
     writer.release()
 
 
-def plotExtBoundaryArea(inf: str,outf: str|None = None,lim: float = 0.9):
+def plotExtBoundaryArea(inf: str,outf: str|None = None,lim: float = 0.9) -> None:
      # if outf is None create it from the inf
     if outf is None:
         outf = Path(inf).stem+"_extct.png"
@@ -3637,14 +3624,14 @@ def plotExtBoundaryArea(inf: str,outf: str|None = None,lim: float = 0.9):
         # set pixels where the max temperature is above lim times max
         blank[data[i,:,:]>=(lim*maxt)] = 255
         # if the entire frame is white then tehre isn"t a target object
-        # so reset it back to zeros        
+        # so reset it back to zeros
         if (blank==MAX_8_BIT).all():
             area.append(0.0)
             continue
         # find contours
         cts = cv2.findContours(blank,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)[0]
         area.append(sum([cv2.contourArea(x) for x in cts]))
-        
+
     f,ax = plt.subplots()
     ax.plot(area)
     ax.set(xlabel="Frame",ylabel="Outer Contour Area",title=f"{Path(inf).stem} Sum External Area")
@@ -3655,8 +3642,8 @@ def plotExtBoundaryArea(inf: str,outf: str|None = None,lim: float = 0.9):
 def slicTemperature(frame: np.ndarray,segs: int = 100) -> np.ndarray:
     """Perform SLIC on a single temperature frame."""
     from skimage.segmentation import slic
-    
-    # rescale temperature to 0 1 
+
+    # rescale temperature to 0 1
     frame -= frame.min()
     frame /= frame.max()
     # perfom slic
@@ -3667,16 +3654,14 @@ def slicTemperature(frame: np.ndarray,segs: int = 100) -> np.ndarray:
         mask[segments == v] = i
     return mask
 
-def slicTemperatureSlider(path: str):
-    from skimage.segmentation import slic
-    
+def slicTemperatureSlider(path: str) -> None:
     data = np.load(path)["arr_0"]
     nf,r,c = data.shape
 
-    def frameNorm(frame):
+    def frameNorm(frame:np.ndarray) -> np.ndarray:
         return (frame-frame.min())/abs(frame.max()-frame.min())
 
-    def on_change(val) -> None:
+    def on_change(_:int) -> None:
         ni = cv2.getTrackbarPos("frame","SLIC")
         segs = max(1,cv2.getTrackbarPos("segs","SLIC"))
         sigma = max(1,cv2.getTrackbarPos("sigma","SLIC"))
@@ -3687,18 +3672,18 @@ def slicTemperatureSlider(path: str):
         for i,v in enumerate(np.unique(segments),start=1):
             mask[segments == v] = i
         cv2.imshow("SLIC",np.column_stack((gray,mask.astype("uint8"))))
-    
+
     # create window to update
     cv2.namedWindow("SLIC")
     cv2.createTrackbar("frame","SLIC",0,nf-1,on_change)
     cv2.createTrackbar("segs","SLIC",0,100,on_change)
     cv2.createTrackbar("sigma","SLIC",0,10,on_change)
-    
+
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
 
-def slicTemperatureColor(frame: str,segs: int = 100):
+def slicTemperatureColor(frame: str,segs: int = 100) -> np.ndarray:
     """Perform SLIC on a single temperature frame."""
     from skimage.segmentation import slic
     from skimage.util import img_as_float
@@ -3712,7 +3697,7 @@ def slicTemperatureColor(frame: str,segs: int = 100):
     return mask
 
 
-def slicTemperatureVideo(path: str,outf: str|None = None,segs: int = 1000):
+def slicTemperatureVideo(path: str,outf: str|None = None,segs: int = 1000) -> None:
     """Iterate over each frame in a temperature NPZ file, perform SLIC to make a mask and write mask to video file.
 
     Inputs:
@@ -3773,7 +3758,7 @@ def slicTemperatureColorVideo(path:str,outf:str|None=None,segs:int=1000) -> None
     writer.release()
 
 
-def denseOpticalFlow(path: str,outf: str|None = None,*args):  # noqa: ANN002
+def denseOpticalFlow(path: str,outf: str|None = None,*args) -> None:  # noqa: ANN002
     """Apply dense optical flow to each frame in a video and save the result.
 
     The drawn result is based on the following code
@@ -3802,7 +3787,7 @@ def denseOpticalFlow(path: str,outf: str|None = None,*args):  # noqa: ANN002
     if not ret:
         msg = f"Failed to read first frame from file {path}!"
         raise ValueError(msg)
-    prevs = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)#
+    prevs = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
     if outf is None:
         outf = Path(path).stem+"_dense_optical_flow.avi"
     r,c,_ = frame.shape
@@ -3829,7 +3814,7 @@ def denseOpticalFlow(path: str,outf: str|None = None,*args):  # noqa: ANN002
     writer.release()
 
 
-def denseOpticalFlowSlider(path: str,filt: list|None = None,winname: str = "optical-flow"):
+def denseOpticalFlowSlider(path: str,filt: list|None = None,winname: str = "optical-flow") -> None:
     """OpenCV slider application to apply dense optical flow and plot the result.
 
     Inputs:
@@ -3854,7 +3839,7 @@ def denseOpticalFlowSlider(path: str,filt: list|None = None,winname: str = "opti
     # create a window
     cv2.namedWindow(winname)
 
-    def on_trackbar(val) -> None:
+    def on_trackbar(_:int) -> None:  # noqa: C901
         # get target frame
         fi = int(cv2.getTrackbarPos("Frame",winname))
         # move frame pointer
@@ -3921,7 +3906,7 @@ def denseOpticalFlowSlider(path: str,filt: list|None = None,winname: str = "opti
     cv2.waitKey()
 
 
-def trackHotPixel(path: str,outf: str|None = None, thresh: float=1300):
+def trackHotPixel(path: str,outf: str|None = None, thresh: float=1300) -> None:
     """Track the hottest pixel in each frame and mark it with a green cross.
 
     Each drawn frame is written to a video file specified by the user.
@@ -3973,7 +3958,7 @@ def trackHotPixelHistory(path: str, thresh:float=1300) -> plt.Figure:
     for ni in range(nf):
         frame = data[ni,:,:]
         rm,cm = np.unravel_index(np.argmax(frame),(r,c))
-        
+
         rhist.append(rm if frame[rm,cm]>thresh else None)
         chist.append(cm if frame[rm,cm]>thresh else None)
     f,ax = plt.subplots()
@@ -3982,7 +3967,7 @@ def trackHotPixelHistory(path: str, thresh:float=1300) -> plt.Figure:
     f.suptitle(f"{Path(path).stem}, Hot Pixel Loc")
     return f
 
-def denseOpticalFlowTemperature(path: str,outf: str|None = None,cmap: str = "hsv",crop_plasma: bool = True,*args):  # noqa: ANN002, FBT001, FBT002
+def denseOpticalFlowTemperature(path: str,outf: str|None = None,cmap: str = "hsv",crop_plasma: bool = True,*args) -> None:  # noqa: ANN002
     """Apply dense optical flow to each frame in the specified file, colormap it and write to a video.
 
     The parameters for dense optical flow are specified as a vector given in the *args parameter.
@@ -4017,7 +4002,7 @@ def denseOpticalFlowTemperature(path: str,outf: str|None = None,cmap: str = "hsv
     hsv = np.zeros((r,c,3),dtype="uint8")
     hsv[..., 1] = 255
     if outf is None:
-        outf = Path(path).stem+f"_dense_optical_flow_temp-{cmap}-{"-cropped-plasma" if crop_plasma else ""}.avi"
+        outf = Path(path).stem+f"_dense_optical_flow_temp-{cmap}-{'-cropped-plasma' if crop_plasma else ''}.avi"
     # create the video writer
     writer = cv2.VideoWriter(outf,cv2.VideoWriter_fourcc(*"mjpg"),30.0,(c*2, r),1)
     # loop collecting frames
@@ -4052,7 +4037,7 @@ def denseOpticalFlowTemperature(path: str,outf: str|None = None,cmap: str = "hsv
             hsv[...,1] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
             hsv[..., 2] = 0
             bgr = hsv
-        # map X (U) component to Hue channel and Y (V) component to the S channel        
+        # map X (U) component to Hue channel and Y (V) component to the S channel
         elif cmap == "uv":
             hsv[..., 0] = cv2.normalize(flow[..., 0], None, 0, 255, cv2.NORM_MINMAX)
             hsv[...,2] = cv2.normalize(flow[..., 1], None, 0, 255, cv2.NORM_MINMAX)
@@ -4069,8 +4054,7 @@ def denseOpticalFlowTemperature(path: str,outf: str|None = None,cmap: str = "hsv
         writer.write(im)
     writer.release()
 
-def denseOpticalFlowTemperatureQuiver(path: str,outf: str|None = None,*args):  # noqa: ANN002
-    from matplotlib.animation import FuncAnimation
+def denseOpticalFlowTemperatureQuiver(path: str,outf: str|None = None,*args) -> None:  # noqa: ANN002
     # open soruce file
     data = np.load(path)["arr_0"]
     nf,r,c = data.shape
@@ -4095,7 +4079,7 @@ def denseOpticalFlowTemperatureQuiver(path: str,outf: str|None = None,*args):  #
     qmat = ax[0].quiver(xmat,ymat,umat,vmat,pivot="mid",scale=1e4,cmap="hot")
 
     # loop collecting frames
-    def update_quiver(num,Q,X,Y):
+    def update_quiver(num:np.ndarray,Q:np.ndarray,X:np.ndarray,Y:np.ndarray) -> Quiver:  # noqa: ARG001, N803
         frame = data[max(0,num-1),:,:]
         prvs = frame2gray(frame)
         frame_next = data[num,:,:]
@@ -4113,7 +4097,7 @@ def denseOpticalFlowTemperatureQuiver(path: str,outf: str|None = None,*args):  #
     anim = FuncAnimation(f,update_quiver,frames=np.arange(nf),fargs=(qmat,xmat,ymat),interval=int((1/30)*1000),blit=False)
     anim.save(outf)
 
-def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,clip_plasma: bool = True,flow_args: list |None= None):  # noqa: FBT001, FBT002
+def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,clip_plasma: bool = True,flow_args: list |None= None) -> None:
     # open soruce file
     if flow_args is None:
         flow_args = []
@@ -4129,7 +4113,7 @@ def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,cl
     vmat = np.zeros_like(ymat)
 
     cp = CoaxialPlane()
-    cp._shape = (r,c)
+    cp._shape = (r,c)  # noqa: SLF001
 
     # make axes
     f,ax = plt.subplots(ncols=3 if hide_temp else 4)
@@ -4141,12 +4125,12 @@ def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,cl
         # set labels
         ax[0].set_title("Temperature (C)")
         ax[1].set_title("Optical Flow")
-        
+
         ax[1].set_xlim(0,c)
         ax[1].set_ylim(0,r)
         ax[1].invert_yaxis()
         ax[1].set_aspect("equal")
-        Q = ax[1].quiver(xmat,ymat,umat,vmat,pivot="mid",scale=1e2)
+        Q = ax[1].quiver(xmat,ymat,umat,vmat,pivot="mid",scale=1e2)  # noqa: N806
         ax[2].contourf(np.zeros((r,c)))
         ax[2].set_title("U")
         ax[3].contourf(np.zeros((r,c)))
@@ -4159,7 +4143,7 @@ def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,cl
             aa.invert_yaxis()
             aa.set_aspect("equal")
         # create quiver object to update
-        Q = ax[0].quiver(xmat,ymat,umat,vmat,pivot="mid",scale=1e2,cmap="hot")
+        Q = ax[0].quiver(xmat,ymat,umat,vmat,pivot="mid",scale=1e2,cmap="hot")  # noqa: N806
         ax[1].contourf(np.zeros((r,c)))
         ax[1].set_title("U")
         ax[2].contourf(np.zeros((r,c)))
@@ -4179,7 +4163,7 @@ def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,cl
         valstep=1,
     )
     # loop collecting frames
-    def update_quiver(val):
+    def update_quiver(_:int) -> Quiver:
         num = int(freq_slider.val)
         frame = data[max(0,num-1),:,:]
         prvs = frame2gray(frame)
@@ -4216,8 +4200,8 @@ def denseOpticalFlowTemperatureQuiverSlider(path: str,hide_temp: bool = False,cl
 
     freq_slider.on_changed(update_quiver)
     plt.show()
-        
-def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,flow_args: list|None=None):  # noqa: FBT001, FBT002
+
+def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,flow_args: list|None=None) -> None:  # noqa: D103, PLR0915
     # open soruce file
     if flow_args is None:
         flow_args = []
@@ -4229,7 +4213,7 @@ def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,fl
     xmat,ymat = np.meshgrid(xx,yy)
 
     cp = CoaxialPlane()
-    cp._shape = (r,c)
+    cp._shape = (r,c)  # noqa: SLF001
 
     # make axes
     f,ax = plt.subplots(ncols=2 if not hide_temp else 1)
@@ -4241,7 +4225,7 @@ def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,fl
         # set labels
         ax[0].set_title("Temperature (C)")
         ax[1].set_title("Optical Flow")
-        
+
         ax[1].set_xlim(0,c)
         ax[1].set_ylim(0,r)
         ax[1].invert_yaxis()
@@ -4252,8 +4236,8 @@ def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,fl
         ax.set_ylim(0,r)
         ax.invert_yaxis()
         ax.set_aspect("equal")
-        
-    
+
+
     # adjust the main plot to make room for the sliders
     f.subplots_adjust(left=0.1,bottom=0.25)
 
@@ -4268,7 +4252,7 @@ def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,fl
         valstep=1,
     )
     # loop collecting frames
-    def update_quiver(val):
+    def update_quiver(_:int) -> None:
         num = int(freq_slider.val)
         frame = data[max(0,num-1),:,:]
         prvs = frame2gray(frame)
@@ -4297,8 +4281,8 @@ def denseOpticalFlowTemperatureStreamSlider(path: str,hide_temp: bool = False,fl
 
     freq_slider.on_changed(update_quiver)
     plt.show()
-    
-def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_plasma: bool = False,**kwargs):  # noqa: ANN003, FBT001, FBT002
+
+def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_plasma: bool = False,**kwargs) -> None:
     """Perform dense optical flow analysis on the temperature data inside an OpenCV trackbar based GUI.
 
     Trackbars allows the user to scan across frames and tweak parameters
@@ -4317,7 +4301,7 @@ def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_pl
 
     cv2.namedWindow("dense-optical-temp")
 
-    def on_change(val) -> None:
+    def on_change(_:int) -> None:  # noqa: C901
         # get frame position
         ni = int(cv2.getTrackbarPos("Frame","dense-optical-temp"))
         # ensure non-zero
@@ -4342,7 +4326,7 @@ def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_pl
         # convert to gray
         prvs = frame2gray(prvs)
         now = frame2gray(now)
-        
+
         flow = cv2.calcOpticalFlowFarneback(prvs, now, None,
                    max(0.01,cv2.getTrackbarPos("Scale","dense-optical-temp")/100),
                    max(1,int(cv2.getTrackbarPos("Levels","dense-optical-temp"))),
@@ -4380,7 +4364,7 @@ def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_pl
             hsv[...,1] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
             hsv[...,2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
             bgr = hsv
-        
+
         cv2.imshow("dense-optical-temp",cv2.hconcat([cv2.applyColorMap(now,cv2.COLORMAP_HOT),bgr]))
         cv2.waitKey(1)
 
@@ -4397,8 +4381,7 @@ def denseOpticalFlowTemperatureSlider(path: str,filt: list | None = None,crop_pl
     on_change(0)
     cv2.waitKey(0)
 
-def videoTemperatureFFT(path: str,outf: str|None = None,use_log_mag: bool = True):  # noqa: FBT001, FBT002
-    from scipy.fft import fft2, fftshift
+def videoTemperatureFFT(path: str,outf: str|None = None,use_log_mag: bool = True) -> None:
     # load temperature
     temp = np.load(path)["arr_0"]
     nf,r,c = temp.shape
@@ -4418,7 +4401,7 @@ def videoTemperatureFFT(path: str,outf: str|None = None,use_log_mag: bool = True
         mag_norm = cc * (np.log(mag_norm + 1))
         mag_norm = mag_norm.astype("uint8")
 
-    # convert phase to grayscale        
+    # convert phase to grayscale
     phase_norm = np.zeros((r,c),dtype="uint8")
     phase_norm = cv2.normalize(phase,phase_norm,0,255,cv2.NORM_MINMAX).astype("uint8")
 
@@ -4447,7 +4430,7 @@ def videoTemperatureFFT(path: str,outf: str|None = None,use_log_mag: bool = True
             cc = 255 / np.log(1 + np.max(mag_norm))
             mag_norm = cc * (np.log(mag_norm + 1)).astype("uint8")
             mag_norm = mag_norm.astype("uint8")
-        # convert phase to grayscale        
+        # convert phase to grayscale
         phase_norm = np.zeros((r,c),dtype="uint8")
         phase_norm = cv2.normalize(phase,phase_norm,0,255,cv2.NORM_MINMAX).astype("uint8")
 
@@ -4455,8 +4438,7 @@ def videoTemperatureFFT(path: str,outf: str|None = None,use_log_mag: bool = True
         writer.write(frame)
     writer.release()
 
-def plotTemperatureFFT(path: str,**kwargs) -> tuple[plt.Figure, plt.Figure]:  # noqa: ANN003
-    from scipy.fft import rfft2
+def plotTemperatureFFT(path: str,**kwargs) -> tuple[plt.Figure, plt.Figure]:
     # load temperature
     temp = np.load(path)["arr_0"]
     # get temp shape
@@ -4472,7 +4454,7 @@ def plotTemperatureFFT(path: str,**kwargs) -> tuple[plt.Figure, plt.Figure]:  # 
     phase_mean = []
     phase_var = []
     # iterate over the frames
-    for f in range(0,nf):
+    for f in range(nf):
         # perform fft ignoring half the signal due to symmetry
         out = rfft2(temp[f,:,:])
         # find magnitude
@@ -4513,12 +4495,12 @@ def plotTemperatureFFT(path: str,**kwargs) -> tuple[plt.Figure, plt.Figure]:  # 
     ax[1,0].set(xlabel="Frame",ylabel="Mean FFT Phase",title="Average FFT Phase")
     ax[1,1].set(xlabel="Frame",ylabel="Var FFT Phase",title="Variance FFT Phase")
     fphase.suptitle(kwargs.get("title",f"{fname} FFT Phase"))
-    
+
     return fmag, fphase
 
 def sliderTemperatureFFT(path:str) -> None:
-    from matplotlib.widgets import Slider
     from matplotlib.colors import LogNorm
+    from matplotlib.widgets import Slider
     from scipy.fft import fft2, fftshift
     # load data
     temp = np.load(path)["arr_0"]
@@ -4558,7 +4540,7 @@ def sliderTemperatureFFT(path:str) -> None:
         valfmt="%d",
     )
     # update function for slider
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get target frame
         ni = int(idx_slider.val)
         frame = temp[ni,:,:]
@@ -4568,7 +4550,7 @@ def sliderTemperatureFFT(path:str) -> None:
         out = fftshift(out)
         # get the magnitude
         mag = np.abs(out)
-        # get the phase        
+        # get the phase
         phase = np.angle(out)
         # show temperature using hot colormap
         ax[0].imshow(frame,cmap="hot")
@@ -4581,9 +4563,9 @@ def sliderTemperatureFFT(path:str) -> None:
     on_changed(0)
     plt.show()
 
-def sliderTemperatureFFTMask(path: str,mtype: int = cv2.MARKER_CROSS,size: int = 20):
-    from matplotlib.widgets import Slider
+def sliderTemperatureFFTMask(path: str,mtype: int = cv2.MARKER_CROSS) -> None:
     from matplotlib.colors import LogNorm
+    from matplotlib.widgets import Slider
     from scipy.fft import fft2, fftshift, ifft2
     # load data
     temp = np.load(path)["arr_0"]
@@ -4634,9 +4616,9 @@ def sliderTemperatureFFTMask(path: str,mtype: int = cv2.MARKER_CROSS,size: int =
         valstep=1,
         valfmt="%d",
     )
-    
+
     # update function for slider
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get target frame
         ni = int(idx_slider.val)
         frame = temp[ni,:,:]
@@ -4652,7 +4634,7 @@ def sliderTemperatureFFTMask(path: str,mtype: int = cv2.MARKER_CROSS,size: int =
         out[mask!=MAX_8_BIT] = 0
         # get the magnitude
         mag = np.abs(out)
-        # get the phase        
+        # get the phase
         phase = np.angle(out)
         # show temperature using hot colormap
         ax[0].imshow(frame,cmap="hot")
@@ -4667,7 +4649,7 @@ def sliderTemperatureFFTMask(path: str,mtype: int = cv2.MARKER_CROSS,size: int =
     on_changed(0)
     plt.show()
 
-def sliderTemperatureEntropy(path: str,segs: int = 29):
+def sliderTemperatureEntropy(path: str,segs: int = 29) -> None:
     """Matplotlib GUI for testing and showing entropy masking.
 
     Each temperature frame axis is broken into segs number of sections.
@@ -4719,7 +4701,7 @@ def sliderTemperatureEntropy(path: str,segs: int = 29):
         valfmt="%d",
     )
 
-    def frame_entropy(frame,segs=segs):
+    def frame_entropy(frame:np.ndarray,segs:int=segs) -> np.ndarray:
         r,c = frame.shape
         # break image into sections
         ent = np.zeros((r,c),dtype="float32")
@@ -4756,7 +4738,7 @@ def sliderTemperatureEntropy(path: str,segs: int = 29):
     on_changed(0)
     plt.show()
 
-def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29):
+def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29) -> None:
     """Break the video frames into segs x segs sections and calculate entropy.
 
     Entropy is colour mapped using opencv hot colormap
@@ -4766,7 +4748,6 @@ def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29):
         opath : Output path for video
         segs : Number of segments along each axis
     """
-    from scipy.stats import entropy
     if opath is None:
         opath = Path(path).stem+"_entropy_mask.avi"
     # load data
@@ -4780,7 +4761,7 @@ def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29):
         msg = f"Failed to open output file at {opath}!"
         raise ValueError(msg)
 
-    def frame_entropy(frame,segs=segs):
+    def frame_entropy(frame:np.ndarray,segs:int=segs) -> np.ndarray:
         r,c = frame.shape
         # break image into sections
         ent = np.zeros((r,c),dtype="float32")
@@ -4798,10 +4779,7 @@ def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29):
         # convert entropy to grayscale
         ent_gray = frame2gray(ent)
         # stack to form RGB image
-        if len(ent_gray.shape)<3:
-            ent_stack = np.dstack(3*(ent_gray,))
-        else:
-            ent_stack = ent_gray.copy()
+        ent_stack = np.dstack(3*(ent_gray,)) if len(ent_gray.shape)<3 else ent_gray.copy()
         # threshold
         _,thresh = cv2.threshold(ent_gray,120,255,cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         thresh_stack = np.dstack(3*(thresh,))
@@ -4814,7 +4792,7 @@ def videoTemperatureEntropy(path: str,opath: str|None = None,segs: int = 29):
         out.write(np.column_stack((frame_rgb,ent_stack,thresh_stack,frame_mask)))
     out.release()
 
-def findOrderedStripes(path: str,order: str = "top-bottom",as_ct: bool = True) -> list:  # noqa: FBT001, FBT002
+def findOrderedStripes(path: str,order: str = "top-bottom",as_ct: bool = True) -> list:
     """Load stripe mask and find the edges of each white blob in the image.
 
     The input order controls the stripes order.
@@ -4872,7 +4850,7 @@ def findOrderedStripes(path: str,order: str = "top-bottom",as_ct: bool = True) -
         masks.append(cv2.drawContours(mask_cc,[cc],-1,(255,255,255),-1)[:,:,0])
     return masks
 
-def plotMaxStripeTemperature(path: str,mask: str,**kwargs) -> plt.Figure:  # noqa: ANN003
+def plotMaxStripeTemperature(path: str,maskpath: str,**kwargs) -> plt.Figure:
     """Plot the max temperature of each stripe in the target file using specified mask.
 
     The mask is a binary image where the white pixels are the location of the stripes.
@@ -4882,15 +4860,14 @@ def plotMaxStripeTemperature(path: str,mask: str,**kwargs) -> plt.Figure:  # noq
 
     Inputs:
         path : Path to NPZ file
-        mask : Path to mask JPG file
+        maskpath : Path to mask JPG file
         title : Figure title. Defailt {filename} stripe temperatures
         stripes_labels : Labels for each stripe. By default it"s Stripe {stripe index}
         no_all : Flag to not plot all. Default False.
         clip : Clip the signal to either side of the activity using find_peaks. Default False.
     Returns figure
     """
-    from scipy.signal import find_peaks
-    masks_list = findOrderedStripes(mask,as_ct=False)
+    masks_list = findOrderedStripes(maskpath,as_ct=False)
     f,ax = plt.subplots(constrained_layout=True)
     data = np.load(path)["arr_0"]
     nf = data.shape[0]
@@ -4919,14 +4896,13 @@ def plotMaxStripeTemperature(path: str,mask: str,**kwargs) -> plt.Figure:  # noq
     f.suptitle(kwargs.get("title",f"{Path(path).stem} Stripe Temperatures"))
     return f
 
-def gaussianMixtureHist(path: str,nb: int = 60):
+def gaussianMixtureHist(path: str) -> None:
     """Attempt to classify each frame using a Gaussian mixture model.
 
     The results are displayed as part of an OpenCV GUI application
 
     Inputs:
         path : Path to input NPZ file
-        nb : Number of bins for histogram (not used)
     """
     from sklearn.mixture import GaussianMixture
     # load npz file
@@ -4959,7 +4935,7 @@ def gaussianMixtureHist(path: str,nb: int = 60):
     on_changed(0)
     cv2.waitKey(0)
 
-def temperatureFlatten(path: str):
+def temperatureFlatten(path: str) -> None:
     from matplotlib.widgets import Slider
     # load numpy file
     data = np.load(path)["arr_0"]
@@ -4991,7 +4967,7 @@ def temperatureFlatten(path: str):
         valstep=1,
     )
 
-    def update(val):
+    def update(_:int) -> None:
         ni = int(freq_slider.val)
         # get target frame + update contour
         frame = data[ni,:,:]
@@ -5029,7 +5005,7 @@ def morphCorrectPlate(img: np.ndarray,corners: list | None = None) -> np.ndarray
     return cv2.warpPerspective(img,warp,(maxh,maxw),flags=cv2.INTER_LINEAR)
 
 
-def morphCorrectPlateVideo(path: str,opath: str|None = None,corners: list | None = None):
+def morphCorrectPlateVideo(path: str,opath: str|None = None,corners: list | None = None) -> None:
     """Attempt to correct the perspective of the plate using a warping and write the result to a video.
 
     Depends on morphCorrectPlate
@@ -5064,7 +5040,7 @@ def morphCorrectPlateVideo(path: str,opath: str|None = None,corners: list | None
         out.release()
 
 
-def convolveColor(path: str,force_odd: bool = True, kernel = None):
+def convolveColor(path: str,force_odd: bool = True, kernel:callable|None = None) -> None:
     """OpenCV slider application that applies a supplied kernel to the data and shows the result.
 
     The user is presented with sliders for the target frame index, weight of the kernel, and the size
@@ -5085,7 +5061,7 @@ def convolveColor(path: str,force_odd: bool = True, kernel = None):
         raise ValueError(msg)
     nf = int(source.get(cv2.CAP_PROP_FRAME_COUNT ))
     # define function for updating
-    def on_changed(val) -> None:
+    def on_changed(_:int) -> None:
         # get frame count
         ni = int(cv2.getTrackbarPos("frame","convolve"))
         # get frame
@@ -5126,7 +5102,7 @@ def convolveColor(path: str,force_odd: bool = True, kernel = None):
     source.release()
 
 
-def convolveTemperature(path: str, force_odd: bool = True, kernel: np.ndarray = None):
+def convolveTemperature(path: str, force_odd: bool = True, kernel: np.ndarray|None = None) -> None:
     """Load NPZ file of 2D arrays and investigate convolving a 2D kernel with the data.
 
     Provides a Figure with trackbars to change the kernel
@@ -5204,7 +5180,7 @@ def formatEstAllPlasmaSizeToDF(data: dict) -> pd.DataFrame:
             temp["File"] = k
             temp["Threshold (C)"] = float(t)
             dfs_to_concat.append(temp)
-    return pd.concat(dfs_to_concat,ignore_index=True)    
+    return pd.concat(dfs_to_concat,ignore_index=True)
 
 
 def stackContourImgs(imgs: dict) -> dict:
@@ -5328,7 +5304,7 @@ def _filterGroup(gp: pd.DataFrame,nstd: int = 3) -> pd.DataFrame:
     return gp
 
 
-def filterPlasmaParams(plasma_all_params: pd.DataFrame):
+def filterPlasmaParams(plasma_all_params: pd.DataFrame) -> pd.DataFrame:
     """Group data by file and for each column replace the data that is greater than 3 std from mean with np.nan.
 
     Skips columns Frame Index, Time (s) and File.
@@ -5341,7 +5317,7 @@ def filterPlasmaParams(plasma_all_params: pd.DataFrame):
     return plasma_all_params.groupby("File").apply(_filterGroup)
 
 
-def plotPlasmaParams(plasma_all_params: pd.DataFrame,opath: str = "."):
+def plotPlasmaParams(plasma_all_params: pd.DataFrame,opath: str = ".") -> None:
     """Iterate over each column in the dataframe, plot and save figures to a target folder.
 
     Designed for dataframes generated by collectPlasmaStats and plasmaGaussianParams
@@ -5378,7 +5354,7 @@ def plotPlasmaParams(plasma_all_params: pd.DataFrame,opath: str = "."):
             plt.close("all")
 
 
-def plotAreaAspectRatio(plasma_all_params: pd.DataFrame,opath: str = ".", **kwargs):
+def plotAreaAspectRatio(plasma_all_params: pd.DataFrame,opath: str = ".", **kwargs) -> None:
     """Plot the aspect ratio and contour area against time along two separate axis.
 
     This was a requested plot
@@ -5400,7 +5376,7 @@ def plotAreaAspectRatio(plasma_all_params: pd.DataFrame,opath: str = ".", **kwar
         file_replace : Replace the filename in the title with the corresponding string
     """
     from matplotlib.lines import Line2D
-    file_replace = kwargs.get("file_replace",None)
+    file_replace = kwargs.get("file_replace")
     # check if user wants to replace the filename with something else
     if file_replace is None:
         file_replace = {fn:fn for fn in plasma_all_params.File.unique()}
@@ -5522,9 +5498,9 @@ def collectFolderAllPlasmaParams(path: str,tlim: float = 1000.0,**kwargs) -> pd.
         f,df = plasmaGaussianParams(fn,lim=tlim,**kwargs)
         df["File"] = Path(fn).stem
         plasma_params_dfs.append(df)
-        df = collectPlasmaStats(fn,tlim)
-        df["File"] = Path(fn).stem
-        plasma_other_params_dfs.append(df)
+        stats_df = collectPlasmaStats(fn,tlim)
+        stats_df["File"] = Path(fn).stem
+        plasma_other_params_dfs.append(stats_df)
 
     plasma_all_params = pd.concat(plasma_params_dfs,ignore_index=True)
     plasma_all_params["Asymmetrical Angle (degrees)"] = np.degrees(plasma_all_params["Asymmetrical Angle (rads)"])
@@ -5534,174 +5510,3 @@ def collectFolderAllPlasmaParams(path: str,tlim: float = 1000.0,**kwargs) -> pd.
     plasma_other_params = pd.concat(plasma_other_params_dfs,ignore_index=True)
     plasma_other_params.dropna(inplace=True)  # noqa: PD002
     return pd.concat([plasma_all_params,plasma_other_params])
-
-if __name__ == "__main__":
-    import scienceplots  # noqa: F401
-    # set plotting style
-    ##plt.style.use(["science","no-latex"])
-    import seaborn as sns
-    sns.set_theme()
-    flag = False
-    b=0
-    # laptop path doe-npz-em-01\npz\powder_plasma\has_plasma\*.npz
-    # desktop path powder_plasma_npz\npz\has_plasma\sheffield_doe_flowrate_gasrate_000*.npz
-##    plasma_df=combinePlasmaStats(glob(r"powder_plasma_npz\npz\has_plasma\*.npz")[:-1],Tlim=1000.0,labels=["40 SL/min","60 SL/min","70 SL/min","80 SL/min"])
-##    plasma_true = findTrueArea(plasma_df)
-##    f,data,imgs = estAllPlasmaSize(glob(r"doe-npz-em-01\npz\powder_plasma\has_plasma\*.npz")[:-1],Tlim=[650,1125],
-##                              labels=["40 SL/min","60 SL/min","70 SL/min","80 SL/min"],return_data=True)
-##    imgs_stack = stackContourImgs(imgs)
-##    # format to a dataframe
-##    data_df = formatEstAllPlasmaSizeToDF(data)
-##    # fit the poly to the target areas
-##    poly_figures, poly_data = fitPolyToPlasmaArea(data,area=[0.15,0.54])
-
-##    all_dfs = []
-##    for fn,label in zip(glob(r"D:\Plasma-Spray-iCoating\scripts\trenchcoat\src\doe-npz-em-01\npz\powder_plasma\has_plasma\sheffield_doe_flowrate_gasrate_000*.npz")[:-1],["40 SL/min","60 SL/min","70 SL/min","80 SL/min"]):
-##        df = collectPlasmaStats(fn)
-##        df["File Path"] = fn
-##        df["Label"] = label
-##        all_dfs.append(df)
-##    combined = pd.concat(all_dfs,ignore_index=True)
-        
-    #kk = list(data.keys())
-    #f,imgs = estPlasmaSize(kk[0])
-    coaxialPlaneSlider(glob(r"D:\Git Clones\Plasma-Spray-iCoating\scripts\trenchcoat\notebooks\tool-head-calibrated\npz\*.npz")[1],
-                        k=1, # order of line fitting
-                        min_segs=0, # min number of fitting
-                        filt=clipMaskPlasma,
-                        )
-    # laptop path: doe-npz-em-01\npz\powder_plasma\good\*.npz
-    # pc path: powder_plasma_npz/npz/good/*.npz
-    #for fn,flag,b in zip(glob(r"doe-npz-em-01\npz\powder_plasma\good\*.npz"),[True,False,False,False],[50,0,0,0]):
-    
-##    plasmaGaussianBoxPlot(r"doe-npz-em-01\npz\powder_plasma\*.npz",lim=1300.0,
-##                          plot_labels=["40 (SL/min)","40 (SL/min)","50 (SL/min)","60 (SL/min)","70 (SL/min)","80 (SL/min)","80 (SL/min)","80 (SL/min)"])
-
-    #temperatureStatsAboveLim(r"doe-npz-em-01\npz\powder_plasma\*.npz",lim=1300.0,
-    #                      plot_labels=["40 (SL/min)","40 (SL/min)","50 (SL/min)","60 (SL/min)","70 (SL/min)","80 (SL/min)","80 (SL/min)","80 (SL/min)"])
-
-
-    # laptop path doe-npz-em-01\npz\powder_plasma\has_plasma\*.npz
-    # desktop path powder_plasma_npz\npz\has_plasma\*.npz
-##    plasma_params_dfs = []
-##    plasma_other_params_dfs = []
-##    for fn in glob(r"tool-head-calibrated/npz/*.npz")[:-1]:
-##        f,df = plasmaGaussianParams(fn,lim=1000.0)
-##        df["File"] = Path(fn).stem
-##        #df["Label"] = label
-##        plasma_params_dfs.append(df)
-##        df = collectPlasmaStats(fn,1000.0)
-##        df["File"] = Path(fn).stem
-##        plasma_other_params_dfs.append(df)
-##
-##    plasma_all_params = pd.concat(plasma_params_dfs,ignore_index=True)
-##    plasma_all_params["Asymmetrical Angle (degrees)"] = np.degrees(plasma_all_params["Asymmetrical Angle (rads)"])
-##    # remove nans
-##    plasma_all_params.dropna(inplace=True)
-##
-##    plasma_other_params = pd.concat(plasma_other_params_dfs,ignore_index=True)
-##    plasma_other_params.dropna(inplace=True)
-##    pstack = pd.concat([plasma_all_params,plasma_other_params])
-    
-##
-##    coaxial_dfs = []
-##    for fn in glob(r"powder_plasma_npz\npz\*.npz"):
-##        f,ft,df = coaxialPlaneParams(fn,k=1,filt=clipMaskPlasma)
-##        df["File"] = Path(fn).stem
-##        coaxial_dfs.append(df)
-##        #filt=[lambda x,b=b, : blockFill(x,(0,464-b)),clipMaskPlasma],
-##        videoCoaxialPlane(fn,k=1,filt=clipMaskPlasma,mode="all",line_col=(0,255,0))
-##        #videoCoaxialPlane(fn,k=2,filt=clipMaskPlasma,mode=0,line_col=(0,255,0))
-##        #videoCoaxialPlane(fn,k=3,filt=clipMaskPlasma,mode=0,line_col=(0,255,0))
-##    if len(coaxial_dfs)>0:
-##        coaxial_all_dfs = pd.concat(coaxial_dfs,ignore_index=True)
-##    coaxial_all_dfs.dropna(inplace=True)
-        
-##        break
-##        f.savefig(f"{Path(fn).stem}-gaussian-plasma-params.png")
-##        plt.close(f)
-##        plasmaGaussianVideo(fn,text_format=lambda h,m,std : f"H: {h} M: {m} STD: {std}",gauss_col=(255,0,255),lim=1300.0)
-        #denseOpticalFlowTemperatureSlider(fn,crop_plasma=False,cmap="mag_only")
-        #denseOpticalFlowTemperatureQuiverSlider(fn,hide_temp=True,clip_plasma=False,flow_args=(20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN))
-##        if flag:
-##            coaxialPlaneSlider(fn,3,filt=[lambda x,b=b, : blockFill(x,(0,464-b)),clipMaskPlasma])
-##        else:
-##            coaxialPlaneSlider(fn,3,filt=lambda x,b=b, : blockFill(x,(0,464-b)))
-##        plasmaGaussianSlider(fn,text_format=lambda h,m,std : f"H: {h} M: {m} STD: {std}",gauss_col=(255,0,255),ct_col=(255,0,0),lim=1300.0)
-
-        #videoCoaxialPlaneExperimental(fn,mode="all")
-##        if flag:
-##            f,ft = coaxialPlaneParams(fn,3,filt=[lambda x,b=b, : blockFill(x,(0,464-b)),clipMaskPlasma])
-##            f.savefig(f"{Path(fn).stem}-coaxial-plane.png")
-##            plt.close(f)
-##            ft.savefig(f"{Path(fn).stem}-coaxial-theta.png")
-##            plt.close(ft)
-##            ft.axes[0].set_yscale("log")
-##            ft.savefig(f"{Path(fn).stem}-coaxial-theta-log.png")
-##            videoCoaxialPlane(fn,1,filt=[lambda x,b=b, : blockFill(x,(0,464-b)),clipMaskPlasma],mode="all")
-##        else:
-##            f,ft = coaxialPlaneParams(fn,3,filt=lambda x,b=b, : blockFill(x,(0,464-b)))
-##            f.savefig(f"{Path(fn).stem}-coaxial-plane.png")
-##            plt.close(f)
-##            ft.savefig(f"{Path(fn).stem}-coaxial-theta.png")
-##            ft.axes[0].set_yscale("log")
-##            ft.savefig(f"{Path(fn).stem}-coaxial-theta-log.png")
-##            plt.close(ft)
-##            videoCoaxialPlane(fn,1,filt=lambda x,b=b, : blockFill(x,(0,464-b)),mode="all")
-
-        #denseOpticalFlowTemperature(fn,None,"mag_only",crop,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-        #if crop:
-        #    denseOpticalFlowTemperature(fn,None,"mag_only",not crop,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-        #denseOpticalFlowTemperatureQuiver(fn,None,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-    #plasmaAllGaussianParams(r"doe-npz-em-01\npz\powder_plasma\has_plasma\*.npz",plot_labels=["40 SL/MIN","50 SL/MIN","60 SL/MIN","70 SL/MIN","80 SL/MIN"],lim=1300.0)
-    #f = plasmaGaussianScatterParam(glob("lsbu-doe-plasma-powder/npz/*.npz")[1:])
-    #sliderTemperatureFFTMask(glob("lsbu-doe-stripe/npz/*.npz")[1],cv2.MARKER_STAR)
-
-    #sns.set_theme("paper")
-    # stripe labels per recording
-##    stripe_labels = {"lsbu_doe_powder_stripes_0002":["15 (G/MIN)","20 (G/MIN)","25 (G/MIN)","30 (G/MIN)","35 (G/MIN)"],
-##                     "lsbu_doe_powder_stripes_0003":["15 (G/MIN)","20 (G/MIN)","25 (G/MIN)","30 (G/MIN)","35 (G/MIN)","15 (G/MIN)","20 (G/MIN)","25 (G/MIN)","30 (G/MIN)","35 (G/MIN)"],
-##                     "lsbu_doe_powder_stripes_0004":["PULSING"]}
-##    for fn in glob("stripes_npz/em01/npz/stripes/*.npz"):
-##        mask = glob(f"stripes_masks/cleanup{Path(fn).stem}*stripes.jpg")
-##        if len(mask)>0:
-##            f = plotMaxStripeTemperature(fn,mask[0],stripe_labels=stripe_labels[Path(fn).stem],title=f"Stripe Temperature ($^\circ$C)")
-##            f.savefig(f"{Path(fn).stem}-stripe-max-temps.png")
-##            plt.close(f)
-##            f = plotMaxStripeTemperature(fn,mask[0],clip=True,title=f"Stripe Temperature ($^\circ$C)",stripe_labels=stripe_labels[Path(fn).stem])
-##            f.savefig(f"{Path(fn).stem}-stripe-max-temps-clipped.png")
-##            plt.close(f)
-##    plt.show()
-    #maskMaxTempSlider(r"D:\FLIR Studio Output\20221116 171052\lsbu_plasma_coating_plate_1.npz")
-##    for fn in glob("powder_plasma_npz/npz/*.npz"):
-##        if Path(fn).stem[-1] == "1":
-##            continue
-##        f = plasmaGaussianParams(fn,True)
-##        f.savefig(f"{Path(fn).stem}-gaussian-plasma-params-flip.png")
-##        plt.close(f)
-##    search = glob("powder_plasma_npz/npz/*.npz")
-##    # remove specific files we know not to contain plasma
-##    # 1,3
-##    for fi,fn in enumerate(search):
-##        if Path(fn).stem[-1] in ["1","3"]:
-##            search.remove(fn)
-##    f = stackPlasmaGaussianParams(search,True)
-##    for aa in f.axes:
-##        aa.legend()
-##    f.savefig("powder-plasma-npz-gaussian-params-stack.png")
-#    for fn,crop in zip(glob("lsbu-doe-plasma-powder/npz/*.npz"),[False,True,False,False,True,False,True,True]):
-        #gaussianMixtureHist(fn)
-##        print(fn)
-##        #denseOpticalFlowTemperatureSlider(fn,crop_plasma=False,cmap="mag_only")
-#        denseOpticalFlowTemperatureQuiverSlider(fn,hide_temp=True,clip_plasma=crop,flow_args=(20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN))
-##
-##        #denseOpticalFlowTemperature(fn,None,"mag_only",crop,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-##        #if crop:
-##        #    denseOpticalFlowTemperature(fn,None,"mag_only",not crop,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-##        denseOpticalFlowTemperatureQuiver(fn,None,20/100,1,21,1,1,1.0,cv2.OPTFLOW_FARNEBACK_GAUSSIAN)
-
-    #for fn in glob("lsbu-doe-stripe/npz/*.npz"):
-    #    trackHotPixel(fn)
-    #    f = trackHotPixelHistory(fn)
-        #f.savefig(f"{Path(fn).stem}-hot-pixel-location.png")
-        #plt.close(f)
