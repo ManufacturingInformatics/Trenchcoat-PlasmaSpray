@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "package.__version__"}
+
+[project]
+name = "Trenchcoat"
+license = {text = "MIT License"}
+version = "1.0.0"
+authors = [
+  {name="David Miller", email="d.b.miller@sheffield.ac.uk"}
+]
+maintainers = [
+  {name="David Miller", email="d.b.miller@sheffield.ac.uk"}
+]
+description = "Python 3 library developed for use in processing thermal imaging and acoustic emission data related to thermal spray. "
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "opencv-python",
+    "pillow",
+    "numpy",
+    "nptdms",
+    "pandas",
+    "PyExifTool",
+    "matplotlib",
+    "scipy",
+    "seaborn"
+]
+
+[project.urls]
+Homepage = "https://github.com/D-B-Miller/Trenchcoat"
+Issues = "https://github.com/D-B-Miller/Trenchcoat/issues"
