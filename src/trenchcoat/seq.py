@@ -1,5 +1,9 @@
 """Parsers for SEQ and CSQ files.
 
+Currently only supports files that use FFF delimiter and JPEG-LS images.
+
+If you want more support added, contact author.
+
 Classes:
     SEQCustomFile : Class for parsing SEQ and CSQ files which use the FFF separator
 """
@@ -7,8 +11,8 @@ Classes:
 from __future__ import annotations
 
 import json
-import os
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 from warnings import warn
 
@@ -19,6 +23,7 @@ from exiftool.exceptions import ExifToolException
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from types import TracebackType
 
 LOADED_EXIFTOOL = False
 try:
@@ -46,17 +51,17 @@ class SEQCustomFile:
 
     """
 
-    def __init__(self, path:str, **kwargs) -> None:  # noqa: PLR0915
-        """Parses SEQ file to decode the data and associated metadata.
+    def __init__(self, path:str|Path, **kwargs) -> None:  # noqa: PLR0915
+        """Parse SEQ file to decode the data and associated metadata.
 
         Inputs:
             path : Full path to SEQ file
             skip_tags : A flag to skip loading in the tags. Default False
             backup_tags_path : Tags can also be loaded from a JSON file rather than from the SEQ/CSQ file.
                                 Default f"{fname}-tags.json
-        """  # noqa: D401
-        self._path = path
-        fname = os.path.splitext(os.path.basename(self._path))[0]
+        """
+        self.__path = Path(path)
+        fname = self.__path.stem
         self._tags = None
         # useful parameters for calculations
         self.B = None
@@ -94,8 +99,8 @@ class SEQCustomFile:
             self.E = float(self._tags["FLIR:Emissivity"])
             self.T_refl = float(self._tags["FLIR:ReflectedApparentTemperature"])
             self.Raw_refl = float(self._tags["FLIR:PlanckR1"]/(self._tags["FLIR:PlanckR2"]*np.exp(self._tags["FLIR:PlanckB"]/self._tags["FLIR:ReflectedApparentTemperature"])-self._tags["FLIR:PlanckF"])-self._tags["FLIR:PlanckO"])
-            self.fshape = float((self._tags["FLIR:RawThermalImageHeight"], self._tags["FLIR:RawThermalImageWidth"]))
-            self.imgtype = float(self._tags["FLIR:RawThermalImageType"])
+            self.fshape = (int(self._tags["FLIR:RawThermalImageHeight"]), int(self._tags["FLIR:RawThermalImageWidth"]))
+            self.imgtype = self._tags["FLIR:RawThermalImageType"]
             self.OD = float(self._tags["FLIR:ObjectDistance"])
             self.ATemp = float(self._tags["FLIR:AtmosphericTemperature"])
             self.IRWTemp = float(self._tags["FLIR:IRWindowTemperature"])
@@ -103,11 +108,11 @@ class SEQCustomFile:
             self.RH = float(self._tags["FLIR:RelativeHumidity"])
 
             # for atmospheric attenuation
-            ATA1 = float(self._tags["FLIR:AtmosphericTransAlpha1"])  # noqa: N806
-            ATA2 = float(self._tags["FLIR:AtmosphericTransAlpha2"])  # noqa: N806
-            ATB1 = float(self._tags["FLIR:AtmosphericTransBeta1"])  # noqa: N806
-            ATB2 = float(self._tags["FLIR:AtmosphericTransBeta2"])  # noqa: N806
-            ATX = float(self._tags["FLIR:AtmosphericTransX"])  # noqa: N806
+            ATA1 = float(self._tags["FLIR:AtmosphericTransAlpha1"])
+            ATA2 = float(self._tags["FLIR:AtmosphericTransAlpha2"])
+            ATB1 = float(self._tags["FLIR:AtmosphericTransBeta1"])
+            ATB2 = float(self._tags["FLIR:AtmosphericTransBeta2"])
+            ATX = float(self._tags["FLIR:AtmosphericTransX"])
 
             emiss_wind = 1 - self.IRT
             refl_wind = 0
@@ -145,7 +150,7 @@ class SEQCustomFile:
         else:
             raise ValueError("Unsupported image type "+ self.imgtype)
         # read in file
-        data = open(self._path,"rb").read()  # noqa: SIM115
+        data = open(self.__path,"rb").read()  # noqa: SIM115
         # search for FF FF FF 00 markers
         for seg in fff_search.finditer(data):
             self._mlocs.append(seg.span()[0])
@@ -156,7 +161,7 @@ class SEQCustomFile:
         # record the number of frames
         self.__numframes = len(self._jlocs)
         # open the file to avoid re-opening the file
-        self._data = open(self._path,"rb")  # noqa: SIM115
+        self._data = open(self.__path,"rb")  # noqa: SIM115
 
     def load_params_from(self, path:str) -> None:
         """Load a separate set of parameters from a JSON file overriding the current.
@@ -184,11 +189,11 @@ class SEQCustomFile:
         self.RH = self._tags["FLIR:RelativeHumidity"]
 
         # for atmospheric attenuation
-        ATA1 = float(self._tags["FLIR:AtmosphericTransAlpha1"])  # noqa: N806
-        ATA2 = float(self._tags["FLIR:AtmosphericTransAlpha2"])  # noqa: N806
-        ATB1 = float(self._tags["FLIR:AtmosphericTransBeta1"])  # noqa: N806
-        ATB2 = float(self._tags["FLIR:AtmosphericTransBeta2"])  # noqa: N806
-        ATX = self._tags["FLIR:AtmosphericTransX"]  # noqa: N806
+        ATA1 = float(self._tags["FLIR:AtmosphericTransAlpha1"])
+        ATA2 = float(self._tags["FLIR:AtmosphericTransAlpha2"])
+        ATB1 = float(self._tags["FLIR:AtmosphericTransBeta1"])
+        ATB2 = float(self._tags["FLIR:AtmosphericTransBeta2"])
+        ATX = self._tags["FLIR:AtmosphericTransX"]
 
         emiss_wind = 1 - self.IRT
         refl_wind = 0
@@ -222,7 +227,7 @@ class SEQCustomFile:
 
 
     def numframes(self) -> int:
-        """Returns the total number of frames according to file metadata."""  # noqa: D401
+        """Return the total number of frames according to file metadata."""
         return self.__numframes
 
 
@@ -231,25 +236,37 @@ class SEQCustomFile:
 
 
     def __str__(self) -> str:  # noqa: D105
-        return f"SEQCustomFile {self._path}, ({self.fshape[0]},{self.fshape[1]}, {self.__numframes})"
+        return f"SEQCustomFile {self.__path}, ({self.fshape[0]},{self.fshape[1]}, {self.__numframes})"
 
 
-    def shape(self) -> tuple:  # noqa: D102
+    def shape(self) -> tuple:
+        """Return the shape of a SINGLE frame in the file."""
         return (*self.fshape, self.__numframes)
 
+    def __enter__(self):  # noqa: ANN204, D105
+        return self
 
-    def close(self) -> None:  # noqa: D102
+    def __exit__(self, exc_type:type[BaseException] | None,  # noqa: D105
+                        exc_val:BaseException | None,
+                        exc_tb:TracebackType | None)-> bool | None:
         self._data.close()
 
+    def close(self) -> None:
+        r"""Close the file pointer to the SEQ/CSQ file."""
+        self._data.close()
 
     def reopen(self) -> None:
         """Re-open the file pointer."""
-        self._data = open(self._path,"rb")  # noqa: SIM115
+        self._data = open(self.__path,"rb")  # noqa: SIM115
 
 
-    def fname(self) -> str:  # noqa: D102
-        return os.path.splitext(os.path.basename(self._path))[0]
+    def fname(self) -> str:
+        """Return the filename of the current file."""
+        return self.__path.stem
 
+    def path(self) -> Path:
+        """Return the full path of the current file."""
+        return self.__path
 
     def frame_rate(self) -> float:  # noqa: D102
         return float(self._tags["FLIR:FrameRate"])
@@ -380,7 +397,7 @@ class SEQCustomFile:
         Returns converted array
         """  # noqa: D401
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         # convert 16-bit FLIR RAW to radiance of measured object
         frame_raw = frame_raw.astype("float64")
         return (frame_raw / E / self.tau1 / self.IRT / self.tau2 - self.raw_atm1_attn -
@@ -409,7 +426,7 @@ class SEQCustomFile:
         Returns array of temperature values in the requested units
         """  # noqa: D401
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         if units not in ["K", "C", "F"]:
             raise ValueError("Received unsupported units string!")
         # convert radiance values to temperature
@@ -438,7 +455,7 @@ class SEQCustomFile:
         """
         # check parameters
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         if units not in ["K", "C", "F"]:
             raise ValueError("Received unsupported units string!")
         # iterate over the mapped locations
@@ -501,7 +518,7 @@ class SEQCustomFile:
         """
         # check parameters
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         # iterate over the mapped locations
         for start, end in self._jlocs[start_at:]:
             # go to location
@@ -569,7 +586,7 @@ class SEQCustomFile:
         Yield array of temperature values in the specified units
         """  # noqa: D401
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         if units not in ["K", "C", "F"]:
             raise ValueError("Received unsupported units string!")
         # get the data range
@@ -623,7 +640,7 @@ class SEQCustomFile:
         Return frame
         """
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         # get the data range
         start, end = self._jlocs[idx]
         # load the data
@@ -680,12 +697,12 @@ class SEQCustomFile:
         Returns the output filename
         """
         if E is None:
-            E = self.E  # noqa: N806
+            E = self.E
         if units not in ["K", "C", "F"]:
             raise ValueError("Received unsupported units string!")
         # if output path is not set then make one using the original path of the recording
         if opath is None:
-            opath = os.path.splitext(os.path.basename(self._path))[0] + ".npz"
+            opath = self.__path.stem + ".npz"
         frames = list(self.tempiter(E, units))
         # filter bad values
         if skip_bad_frames:
@@ -744,7 +761,7 @@ class SEQCustomFile:
             rad : Radiance values converted to colour vaues
             temp : Temperature values converted to colour values
 
-        The input cmap is the OpenCV integer for referencing a colour map (e.g. cv2.COLORMAP_HOT). 
+        The input cmap is the OpenCV integer for referencing a colour map (e.g. cv2.COLORMAP_HOT).
         If None, then it's saved as Grayscale (default)
 
         The emissivity can be set using the E keyword.
@@ -757,7 +774,8 @@ class SEQCustomFile:
 
         Returns a list of the file paths for the saved images
         """
-        fname = os.path.splitext(os.path.basename(opath))[0]
+        opath = Path(opath)
+        parent = opath.name
         onames = []
         if mode == "raw":
             frame_iter = self
@@ -768,7 +786,7 @@ class SEQCustomFile:
 
         for i, frame in enumerate(frame_iter):
             # make output path
-            oname = os.path.join(opath,f"{fname}_{mode}_frame_{i:06}.png")
+            oname = opath + f"{parent}_{mode}_frame_{i:06}.png"
 
             # get the image
             if mode in ["raw","rad"]:
